@@ -1,79 +1,100 @@
 # dsh-shell-wsl
 
-DSH 直连容器沙箱执行器：在 Windows（Docker Desktop / WSL2 后端）上为 DeepSeek Harness
-提供**真实 Linux bash 执行环境**。每个 bash 工具调用被路由为一个一次性 Docker 容器：
+> English · [中文](README.zh.md)
+
+A **real-Linux bash execution environment** for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (dsh) on Windows: every `bash` tool call is routed into a **disposable Docker container** (Docker Desktop / WSL2 backend), with the workspace bind-mounted for two-way file sharing and automatic integration with the official permission presets.
 
 ```text
 docker run --rm --name dsh-exec-<pid>-<seq> -i
-  -v <workspace>:/workspace[:ro] -w /workspace/<rel> -e ... <image> bash -c <command>
+  -v <session workspace>:/workspace[:ro] -w /workspace/<rel> -e ... ubuntu:24.04 bash -c <command>
 ```
 
-模型继续使用官方 `bash` 工具（零新工具、零工具层改动）；命令真实运行在 WSL2 Linux
-内核的容器里，工作区经 bind mount 双向共享。执行器声明官方 `sandboxMode` 能力位
-（`workspace-write`），与权限 preset（read-only / workspace-write /
-danger-full-access）自动集成——read-only 会话挂载 `:ro`，其余挂载读写。
+The model keeps using the official `bash` tool (no new tools, no tool-layer changes); commands genuinely run in a container on the WSL2 Linux kernel. The executor declares the official `sandboxMode` capability bit (`workspace-write`), so permission presets (read-only / workspace-write / danger-full-access) integrate automatically — read-only sessions mount the workspace `:ro`, everything else mounts read-write.
 
-对应设计文档：`dsh-shell-wsl-design.md`（0.1.0-rc.6 源码契约已逐行核对）。
+See the design document: `dsh-shell-wsl-design.md` (checked line-by-line against the `@deepseek-ai/dsh` 0.1.0-rc.6 source contracts).
+
+## Why a container, instead of the other approaches
+
+On Windows, dsh exposes only `pwsh` by default (the official `tool-bash` is disabled on win32). The common community approaches to getting bash back each come with trade-offs:
+
+| | **dsh-shell-wsl (this plugin)** | Git Bash (MSYS2) approaches | WSL distro-direct approaches |
+|---|---|---|---|
+| Runtime | **Real Linux**: WSL2 kernel + Ubuntu 24.04 userspace | MSYS2 emulation layer, not Linux | Real Linux, but tied to a specific installed distro |
+| Isolation | Disposable container, destroyed via `--rm` after every call | No container isolation; runs as a host process | Distro lives forever; state accumulates across sessions |
+| Permission-preset linkage | Native: read-only automatically mounts `:ro` | Most implementations require danger-full-access, or fail to start inside the sandbox | Common implementations let bash bypass the DSH file policy |
+| Prerequisite | Docker Desktop only | Git for Windows | WSL2 + at least one distro |
+| State & reproducibility | Stateless; every call starts from a pinned image | Stateless | Stateful; easy to pollute with earlier commands |
+
+**The trade-off**: one container cold start per command buys you real Linux, isolation, and permission linkage. If you want a zero-dependency, millisecond-start POSIX-ish environment, a Git Bash approach fits better. If you want a stateful Linux environment deeply tied to your distro, a WSL-direct approach fits better. If you want a **clean, reproducible, permission-constrained real-Linux execution environment inside a Windows session**, this plugin is exactly that.
+
+- **Real Linux**: genuine WSL2 kernel and Ubuntu userspace — Linux binaries, apt, pipes and process semantics work as-is
+- **Zero pollution**: every command runs in a brand-new container that is destroyed afterwards; no leftover `cd`, variables, or apt installs
+- **Permission linkage**: session permission presets map directly to read-only/read-write mounts (danger-full-access is equivalent to workspace-write under a container executor — see §7)
+- **Complete lifecycle**: background jobs, timeout tree-kill, orphan-container cleanup, and infrastructure-error classification, all inherited from the official executor contract
+- **Zero tool-layer changes**: the model keeps using the official `bash` tool; nothing new to learn
 
 ---
 
-## 1. 环境要求（P0，安装前必须验证）
+## 1. Environment requirements (P0 — verify before installing)
 
-1. **Docker Desktop 运行中**（WSL2 后端），Windows 侧 `docker` CLI 可用：
+1. **Docker Desktop running** (WSL2 backend), with the `docker` CLI available on Windows:
    ```powershell
-   docker version            # 客户端与服务端都要有输出
+   docker version            # both client and server sections must print
    docker context show       # desktop-linux
    ```
-2. **预热镜像**（首次拉取可能超过默认 120s 超时，务必先拉）：
+2. **Pre-warm the image** (a first-time pull can exceed the default 120s timeout — pull it first):
    ```powershell
    docker pull ubuntu:24.04
    ```
-3. **验证挂载链路**（把路径换成你的工作区）：
+3. **Verify the mount path** (replace the path with your workspace):
    ```powershell
    docker run --rm -v E:\your\workspace:/workspace -w /workspace ubuntu:24.04 bash -c "uname -a && pwd && ls"
    ```
-   输出应为 `Linux ... microsoft-standard-WSL2`、`/workspace` 且 `ls` 能看到 Windows 侧文件。
-4. 只有使用 `wsl` 传输才需要发行版（默认 docker-cli 传输不需要）：
-   另需 `wsl --install -d Ubuntu` 并在 Docker Desktop 中开启该发行版的 WSL 集成。
+   Expected: `Linux ... microsoft-standard-WSL2`, `/workspace`, and `ls` showing your Windows-side files.
+4. A distro is only required for the `wsl` transport (the default docker-cli transport needs none):
+   in that case also run `wsl --install -d Ubuntu` and enable WSL integration for that distro in Docker Desktop.
 
-> 注意：以上命令请在**你自己的终端**执行。agent 的工具沙箱可能拦掉 `docker`/WSL
-> 探测（E_ACCESSDENIED / 命名管道），插件本身跑在宿主进程、不受此限制。
+> Note: run the commands above in **your own terminal**. An agent's tool sandbox may block
+> `docker`/WSL probing (E_ACCESSDENIED / named pipes); the plugin itself runs in the host
+> process and is not affected.
 
-## 2. 安装
+## 2. Installation
 
 ```powershell
 dsh plugin --profile web add dsh-shell-wsl
 ```
 
-等价于把包加入 `~/.dsh/profiles/web/package.json` 并写入 `dsh.profile.bundles`；
-bundle 元数据 `dsh.bundle.patch` 使 `cordis.patch.yml` 自动进入补丁栈
-（层序：bundle 层 → profile 层 → `$DSH_HOME/cordis.patch.yml` → `--patch` 层）。
+This adds the package to `~/.dsh/profiles/web/package.json` and writes `dsh.profile.bundles`;
+the `dsh.bundle.patch` bundle metadata brings `cordis.patch.yml` into the patch stack
+(layer order: bundle layer → profile layer → `$DSH_HOME/cordis.patch.yml` → `--patch` layer).
 
-补丁做两件事：插入 `shell-wsl` 行（win32 之外自动 disabled，保持可移植），并把
-宿主 `pwsh-sandbox` 行 `disabled: true`（`ctx.shell` 只能有一个提供者，
-双提供者重复服务注册会 fail loud）。
+The patch does two things: inserts the `shell-wsl` row (auto-disabled outside win32, stays
+portable), and sets the host `pwsh-sandbox` row `disabled: true` (`ctx.shell` can only have
+one provider — duplicate service registration fails loud).
 
-git 托管插件需按 pnpm 提示在 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds`
-放行 prepare 脚本。
+Git-hosted plugins need the prepare script allowed in the profile's `pnpm-workspace.yaml`
+under `allowBuilds`, per pnpm's prompt.
 
-## 3. Web 界面：启用 wsl-container preset
+## 3. Web UI: enable the wsl-container preset
 
-Web 下宿主工具行由 dsh-web-app 禁用、工具归 agent preset，所以装完插件还要启用 preset：
+Under the web surface the host tool rows are disabled by dsh-web-app and tools come from agent
+presets, so enable the preset after installing the plugin:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File <插件目录>\scripts\install-preset.ps1 -SetDefault
+powershell -ExecutionPolicy Bypass -File <plugin dir>\scripts\install-preset.ps1 -SetDefault
 ```
 
-或手动：把 `presets/wsl-container/` 复制到 `~/.dsh/.agent-presets/wsl-container/`，
-然后在 Web 设置页把默认 preset 切到 `WSL 容器模式`。该 preset 相对 standard 只改两行：
-`tool-bash` → `disabled: false`，`tool-pwsh` → `disabled: true`（必须——
-`tool-pwsh` 也消费 `ctx.shell`，留着会用容器执行器跑 pwsh 命令串，语义错乱）。
+Or manually: copy `presets/wsl-container/` to `~/.dsh/.agent-presets/wsl-container/` and switch
+the default preset to `WSL 容器模式` on the Web settings page. The preset changes exactly two
+rows relative to standard: `tool-bash` → `disabled: false` and `tool-pwsh` → `disabled: true`
+(the latter is mandatory — `tool-pwsh` also consumes `ctx.shell`, and leaving it enabled would
+run PowerShell command strings through the container executor, which makes no sense).
 
-## 4. tui / headless 集成
+## 4. tui / headless integration
 
-tui/headless 的 agent 平面在宿主（base patch：win32 下 tool-bash disabled、tool-pwsh
-enabled）。在 **profile patch**（不能写进 bundle patch——web 下会与 preset 双重注册
-`bash` 工具名冲突）显式换行：
+For tui/headless, the agent plane lives in the host (base patch: tool-bash disabled on win32,
+tool-pwsh enabled). Flip the rows in the **profile patch** (not the bundle patch — under web
+that would double-register the `bash` tool name against the preset):
 
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml
@@ -84,28 +105,29 @@ enabled）。在 **profile patch**（不能写进 bundle patch——web 下会�
   disabled: true
 ```
 
-## 5. 配置
+## 5. Configuration
 
-### 5.1 组合层（cordis 行 config，改这里需编辑补丁层）
+### 5.1 Composition layer (cordis row config — edit this via the patch layers)
 
-| 字段 | 默认 | 说明 |
-|---|---|---|
-| `transport` | `docker-cli` | `docker-cli`（Windows 侧 CLI）或 `wsl`（`wsl.exe -d <distro> -- docker`） |
-| `distro` | `Ubuntu` | 仅 wsl 传输使用 |
-| `image` | `ubuntu:24.04` | 必须含 bash（alpine/busybox 不含，会报 runner 失败） |
-| `workspaceMount` | `/workspace` | 容器内挂载点 |
-| `workspaceRoot` | 无（兜底） | 固定工作区根；正常走 per-call policy 的 workspaceRoot |
-| `containerPrefix` | `dsh-exec` | 容器名前缀：`<prefix>-<pid>-<seq>`，≤63 字符 |
+| Field | Default | Description |
+| --- | --- | --- |
+| `transport` | `docker-cli` | `docker-cli` (Windows-side CLI) or `wsl` (`wsl.exe -d <distro> -- docker`) |
+| `distro` | `Ubuntu` | Used only by the wsl transport |
+| `image` | `ubuntu:24.04` | Must include bash (alpine/busybox don't — that surfaces as a runner failure) |
+| `workspaceMount` | `/workspace` | Mount point inside the container |
+| `workspaceRoot` | none (fallback) | Fixed workspace root; normally the per-call policy's workspaceRoot is used |
+| `containerPrefix` | `dsh-exec` | Container name prefix: `<prefix>-<pid>-<seq>`, ≤63 chars |
 
 ```yaml
-# 例：换镜像（在 profile patch 里重写该行 config——patch 是整行 config 替换，需重述全部字段）
+# Example: switch images (rewrite the row config in the profile patch — patch replaces the
+# whole row config, so restate every field)
 - id: shell-wsl
   config:
     transport: docker-cli
     image: debian:bookworm-slim
 ```
 
-### 5.2 设置层（settings.yaml，热更新，仅预算字段）
+### 5.2 Settings layer (settings.yaml, hot-reload, budget fields only)
 
 ```yaml
 # ~/.dsh/settings.yaml
@@ -117,70 +139,92 @@ bash:
   graceMs: 3000
 ```
 
-环境身份字段（transport/image/…）**不能**写进 settings.yaml——基类构造函数用基类
-schema 注册了 `bash` 设置命名空间，未知键会被 schema 拒绝。
+Environment identity fields (transport/image/…) must **not** go into settings.yaml — the base
+constructor registers the `bash` settings namespace with the base schema, and unknown keys are
+rejected by the schema.
 
-## 6. 行为语义
+## 6. Behavior semantics
 
-- **正常退出零开销**：信任 `--rm`，不额外 spawn 任何 docker 命令。
-- **kill / 超时 / 取消**：Windows 侧 `taskkill /T /F` 杀掉 docker.exe 树后，
-  追加 best-effort `docker rm -f <name>`；并武装懒清理 reaper。
-- **懒清理 reaper**：下一次 spawn 前（仅当发生过 kill，或本次执行器实例启动后的首次
-  spawn——覆盖宿主崩溃恢复）执行一次 `docker ps -a` 前缀扫描，force-remove 所有
-  不在活动句柄表里的遗留容器。正常运行期间 reaper 不触发。
-- **基础设施错误分类**（§4.4）：daemon 未运行、docker CLI 缺失、镜像拉取失败、镜像
-  无 bash、发行版缺失 → `WslContainerUnavailableError`（isError，模型停止重试）；
-  命令自身非零退出 → 普通 `[exit code: N]`。
-- **read-only**：挂载 `:ro`，容器内写 /workspace 是 EROFS 类普通命令错误；
-  **workspace-write / danger-full-access**：均挂载读写（容器执行器无法授予宿主全权，
-  danger-full-access 等价于 workspace-write）。
-- **workdir**：Windows 绝对路径按工作区根做大小写不敏感前缀映射为
-  `/workspace/<rel>`；已是 `/workspace` 前缀的容器路径透传；工作区之外的路径回退
-  `/workspace` 并在 stderr 追加一行告警（不阻断）。
-- **env**：`ENV_OVERRIDES`（NO_COLOR/TERM/PAGER/GIT_PAGER）+ spec.env + spec.dshEnv
-  物化为 `-e KEY=VALUE`（argv 逐参数传递，无引号问题），强制 `LANG=C.UTF-8`。
-  wsl 传输下 `DSH_*` 中的 Windows 路径翻译为 `/mnt/<drive>/...`。
-- **stdin**：`docker run -i` 保持 stdin 打开，hooks 的 stdin 数据通道可用。
-- 后台任务、超时、输出上限、spill 落盘、`[exit code: N]` 标记契约全部继承自
-  `LocalBashExecutor` / `ctx.subprocess`，零重写。
+- **Normal exit costs nothing extra**: `--rm` is trusted; no additional docker command is spawned.
+- **kill / timeout / cancel**: the docker.exe tree is killed with `taskkill /T /F` on the Windows
+  side, then a best-effort `docker rm -f <name>` is appended; the lazy reaper is armed.
+- **Lazy reaper**: before the next spawn (only when a kill happened, or on the first spawn of this
+  executor instance — covering host-crash recovery) a `docker ps -a` prefix scan force-removes
+  every leftover container not in the live-handle table. The reaper never runs during normal operation.
+- **Infrastructure error classification**: daemon down, docker CLI missing, image pull failure,
+  image without bash, distro missing → `WslContainerUnavailableError` (isError, the model stops
+  retrying); a command's own nonzero exit stays an ordinary `[exit code: N]`.
+- **read-only**: mounts `:ro`; writing /workspace inside the container is an ordinary EROFS-class
+  command error. **workspace-write / danger-full-access**: both mount read-write (a container
+  executor cannot grant host-wide access, so danger-full-access is equivalent to workspace-write).
+- **workdir**: Windows absolute paths map to `/workspace/<rel>` by case-insensitive prefix match
+  against the workspace root; container paths already under `/workspace` pass through; paths
+  outside the workspace fall back to `/workspace` with a one-line stderr warning (non-blocking).
+- **env**: `ENV_OVERRIDES` (NO_COLOR/TERM/PAGER/GIT_PAGER) + spec.env + spec.dshEnv materialize as
+  `-e KEY=VALUE` (passed as argv parameters, no quoting issues), and `LANG=C.UTF-8` is forced.
+  Under the wsl transport, Windows paths in `DSH_*` are translated to `/mnt/<drive>/...`.
+- **stdin**: `docker run -i` keeps stdin open, so hooks' stdin data channel works.
+- Background jobs, timeouts, output caps, spill files, and the `[exit code: N]` marker contract
+  are all inherited from `LocalBashExecutor` / `ctx.subprocess` — zero reimplementation.
 
-## 7. 已知限制
+## 7. Known limitations
 
-- 无交互式 PTY / 持久 shell（官方 seam 无该词汇）。
-- Docker Desktop 文件共享（grpcfuse / 9p）IO 比原生慢；容器内写入的属主映射有怪癖。
-- `rm -rf` 在挂载卷内不会被 ACL 拦截（与 workspace-write 模式风险面相同）；对系统盘
-  无写权限（容器只看得见挂载卷）。
-- 首次拉取大镜像可能超时（P0 预热规避；README 明示）。
-- 私有镜像仓库：docker-cli 传输共享 Docker Desktop 凭据；wsl 传输需在发行版内配
-  credential helper。
+- **No interactive PTY / persistent shell**: every call is a brand-new container (matching the
+  official fresh-shell semantics; apt installs, `cd` and variables don't survive across calls).
+  If you need a persistent shell / PTY, extend via the official `terminal` capability family —
+  this plugin deliberately keeps the one-shot semantics.
+- **Occasional timeouts on short commands**: usually a first-time image pull; pre-warm with
+  `docker pull` (see §1).
+- **Mount I/O is slower than native Windows**: inherent to Docker Desktop file sharing
+  (9p / grpcfuse).
+- **`rm -rf` inside the mount is not blocked by ACL**: the container can only see the mounted
+  volume and has no write access to the system drive — the same risk surface as workspace-write mode.
+- **danger-full-access is equivalent to workspace-write**: a container executor cannot grant
+  host-wide access; both mount read-write (see §6).
+- **No `docker` / `wsl.exe` inside the container, on purpose**: do Docker/WSL troubleshooting
+  in **the user's own terminal** (probing from inside the agent sandbox is unreliable too).
+- **Private image registries**: the docker-cli transport shares Docker Desktop credentials; the
+  wsl transport needs a credential helper configured inside the distro.
+- **Chinese / UTF-8 output**: the container forces `LANG=C.UTF-8`; rendering is normal.
 
-## 8. 验收清单（对照设计文档 §9）
+## 8. Acceptance checklist (mirrors design doc §9)
 
-1. `bash` 工具出现；`uname -s` → `Linux`。
-2. `workdir` 传 `E:\…\sub` 时容器内 `pwd` → `/workspace/sub`，双向文件可见。
-3. `run_in_background` + `job_output` / `job_kill` 全链路可用。
-4. 超时/kill 之后 `docker ps -a --filter name=dsh-exec-` 为空；正常运行后同样为空。
-5. 停止 Docker Desktop 后调用 bash：呈现为基础设施错误（runner 失败），非命令失败。
-6. read-only 会话容器内写 /workspace 失败（ro 挂载）；workspace-write 可写。
-7. `wsl-container` preset 下只有 `bash`、没有 `pwsh`。
-8. Windows 侧 read/write/edit 文件工具行为不变（回归）。
+> This plugin has completed a full acceptance round: the runtime chain (tool table / real Linux /
+> mount / workdir mapping / two-way file sharing / background jobs / timeout / no orphan
+> containers / read-only mount enforcement / file-tool regression) and the unit + integration
+> test suites all pass. The checklist below is kept for re-verification and regression runs.
 
-## 9. 开发
+1. The `bash` tool appears; `uname -s` → `Linux`.
+2. With `workdir` set to `E:\…\sub`, `pwd` inside the container → `/workspace/sub`; files are visible in both directions.
+3. `run_in_background` + `job_output` / `job_kill` work end-to-end.
+4. After timeout/kill, `docker ps -a --filter name=dsh-exec-` is empty; also empty after normal runs.
+5. With Docker Desktop stopped, a bash call surfaces as an infrastructure error (runner failure), not a command failure.
+6. In a read-only session, writing /workspace inside the container fails (ro mount); workspace-write can write.
+7. Under the `wsl-container` preset there is only `bash`, no `pwsh`.
+8. Windows-side read/write/edit file tools behave unchanged (regression).
+9. `npm test` is fully green (6 test files, 49 cases); `$env:DSH_WSL_INTEGRATION="1"; npm run test:integration` is fully green (9 cases, requires Docker Desktop running).
+
+## 9. Development
 
 ```powershell
-# 一次性环境准备：把依赖 junction 到本机 DSH 安装的 node_modules（免装 peer 依赖）
+# One-time environment prep: junction the deps to the local DSH install's node_modules
+# (avoids installing peer dependencies)
 New-Item -ItemType Directory -Force node_modules | Out-Null
 cmd /c mklink /J node_modules\@deepseek-ai "$env:APPDATA\npm\node_modules\@deepseek-ai\dsh\node_modules\@deepseek-ai"
 cmd /c mklink /J node_modules\@types       "$env:APPDATA\npm\node_modules\@deepseek-ai\dsh\node_modules\@types"
-# TypeScript 构建工具装在插件目录外（npm 在含 junction 的 node_modules 里 reify 会 ELOOP）
+# TypeScript lives outside the plugin dir (npm reify ELOOPs on junctioned node_modules)
 npm install --prefix ..\.dsh-dev-tools --no-save --no-package-lock typescript
 
 npm run build                    # tsc → lib/
-npm test                         # 单元测试（纯函数 + 假 subprocess 的执行器测试）
+npm test                         # unit tests (pure functions + executor tests with a fake subprocess)
 $env:DSH_WSL_INTEGRATION = "1"
-npm run test:integration         # 真实 docker 集成测试（需 Docker Desktop 运行）
+npm run test:integration         # real-docker integration tests (requires Docker Desktop running)
 ```
 
-结构：`src/`（纯函数：paths/env/naming/classify/argv + 执行器 index）→ 编译到
-`lib/`；`tests/`（单元 + 可选集成）；`cordis.patch.yml`（bundle 补丁层）；
-`presets/wsl-container/`（web preset）；`scripts/install-preset.ps1`。
+Layout: `src/` (pure functions: paths/env/naming/classify/argv + the executor index) → compiled to
+`lib/`; `tests/` (unit + optional integration); `cordis.patch.yml` (bundle patch layer);
+`presets/wsl-container/` (web preset); `scripts/install-preset.ps1`.
+
+## License
+
+MIT
