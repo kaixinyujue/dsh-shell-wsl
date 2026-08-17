@@ -1,0 +1,3 @@
+name: WSL 容器模式
+description: 在 Windows 上经 Docker 容器（WSL2 后端）运行真实 Linux bash 的编码 Agent：bash 工具路由到一次性容器、工作区 bind mount 挂载，其余与标准模式一致。
+order: 2

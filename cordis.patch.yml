@@ -1,0 +1,25 @@
+# dsh-shell-wsl bundle patch: swap the win32 pwsh shell provider for the
+# Docker-container bash executor. The base layer keeps `pwsh-sandbox` as the
+# win32 `ctx.shell` provider; mounting two shell providers fails loud on the
+# duplicate service registration, so the pwsh row must yield.
+#
+# Row order carries no load semantics. The shell row stays portable:
+# `disabled` evaluates per platform at load time.
+
+- insert:
+    - id: shell-wsl
+      name: dsh-shell-wsl
+      disabled: !!js process.platform !== 'win32'
+      config:
+        transport: docker-cli
+        image: ubuntu:24.04
+
+# The host's agent-plane tool rows are NOT touched here: under the web
+# surface those rows are disabled by dsh-web-app and tools come from agent
+# presets (see presets/wsl-container); enabling `tool-bash` at the bundle
+# layer would collide with a preset registering the same tool name. For
+# tui/headless, enable `tool-bash` / disable `tool-pwsh` in the profile
+# patch instead (see README §Installation).
+
+- id: pwsh-sandbox
+  disabled: true

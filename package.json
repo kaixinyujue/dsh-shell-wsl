@@ -1,0 +1,59 @@
+{
+  "name": "dsh-shell-wsl",
+  "version": "0.1.0",
+  "description": "Docker-container (WSL2 backend) shell executor for the DeepSeek Harness bash capability seam on Windows: every bash tool call runs in a disposable Linux container with the workspace bind-mounted.",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./src/*": "./src/*",
+    "./presets/*": "./presets/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml",
+    "presets",
+    "README.md"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-bash-local": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-shell": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "shell",
+    "bash",
+    "docker",
+    "wsl",
+    "container",
+    "sandbox",
+    "windows"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json || node ..\\.dsh-dev-tools\\node_modules\\typescript\\lib\\tsc.js -p tsconfig.json",
+    "pretest": "npm run build",
+    "test": "node --test \"tests/*.test.js\"",
+    "test:integration": "node --test \"tests/integration.test.js\""
+  }
+}
