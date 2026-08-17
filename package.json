@@ -20,9 +20,18 @@
     "src",
     "cordis.patch.yml",
     "presets",
+    "scripts",
     "README.md"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kaixinyujue/dsh-shell-wsl.git"
+  },
+  "homepage": "https://github.com/kaixinyujue/dsh-shell-wsl#readme",
+  "bugs": {
+    "url": "https://github.com/kaixinyujue/dsh-shell-wsl/issues"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
